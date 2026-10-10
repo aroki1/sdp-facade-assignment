@@ -64,6 +64,16 @@ class AccessSubsystemTest {
     }
 
     @Test
+    void revokedPassesFreeCapacity() {
+        AccessPass pass = access.grant("REF-1", "alice", "BALCONY", 4_500);
+        access.revoke(pass.id(), "cancelled");
+        access.revoke(pass.id(), "cancelled twice");
+
+        assertEquals(0, access.passesAt("G2"));
+        assertEquals("cancelled", access.find(pass.id()).orElseThrow().revokeReason());
+    }
+
+    @Test
     void zonesWithoutAGateAreDenied() {
         assertThrows(AccessDeniedException.class, () -> access.grant("REF-1", "alice", "ROOFTOP", 1));
     }
@@ -80,12 +90,50 @@ class AccessSubsystemTest {
     }
 
     @Test
+    void refundRevokesThePassRecordsTheAmountAndIsIdempotent() {
+        AccessPass pass = access.grant("REF-1", "alice", "FLOOR", 9_000);
+
+        RefundService.Refund refund = access.refund(pass.id());
+
+        assertEquals(100, refund.percent());
+        assertEquals(9_000, refund.amountCents());
+        assertEquals(AccessPass.Status.REVOKED, access.find(pass.id()).orElseThrow().status());
+        assertEquals(refund, access.refund(pass.id()));
+        assertEquals(1, access.refunds().size());
+    }
+
+    @Test
+    void usedPassesAreNotRefundable() {
+        AccessPass pass = access.grant("REF-1", "alice", "FLOOR", 9_000);
+        access.scan(pass.id());
+
+        assertThrows(IllegalStateException.class, () -> access.refund(pass.id()));
+        assertThrows(IllegalStateException.class, () -> access.revoke(pass.id(), "late"));
+    }
+
+    @Test
     void refundPolicyDependsOnDaysBeforeTheShow() {
         RefundService policy = new RefundService();
         assertEquals(100, policy.refundPercent(TODAY, TODAY.plusDays(14)));
         assertEquals(50, policy.refundPercent(TODAY, TODAY.plusDays(13)));
         assertEquals(50, policy.refundPercent(TODAY, TODAY.plusDays(3)));
         assertEquals(0, policy.refundPercent(TODAY, TODAY.plusDays(2)));
+    }
+
+    @Test
+    void passesGatesAndRefundsSurviveARestart() {
+        AccessPass pass = access.grant("REF-1", "alice", "FLOOR", 9_000);
+        access.closeGate("G2");
+        access.refund(pass.id());
+        access.configureGate("G2", List.of("BALCONY"), 99);
+
+        AccessService afterRestart = accessFor(dataDir, TODAY.plusDays(20));
+
+        assertEquals(pass.id(), afterRestart.findByReference("REF-1").orElseThrow().id());
+        AccessControlGate.Gate g2 = afterRestart.gates().stream().filter(g -> g.id().equals("G2")).findFirst().orElseThrow();
+        assertFalse(g2.open());
+        assertEquals(1, g2.capacity());
+        assertEquals(1, afterRestart.refunds().size());
     }
 
     @Test
