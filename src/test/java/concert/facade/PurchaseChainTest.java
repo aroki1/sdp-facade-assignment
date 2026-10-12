@@ -9,7 +9,9 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Map;
 
+import static concert.facade.ChainStep.ACCESS;
 import static concert.facade.ChainStep.SEATING;
+import static concert.facade.ChainStep.TICKETING;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PurchaseChainTest {
@@ -35,6 +37,44 @@ class PurchaseChainTest {
     }
 
     @Test
+    void fraudRejectionAfterTheSeatWasHeldUndoesTheSeatHoldOnly() {
+        venue.buyerIsBlocklisted("mallory");
+
+        ConcertVenue.Attempt attempt = venue.fan("mallory").buysSeat("C5")
+                .failsAt(TICKETING)
+                .afterUndoing(SEATING);
+
+        venue.seat("C5").isFreeAgain();
+        venue.order(attempt.orderId()).hasNoTicket().hasNoPass().undidInThisOrder(SEATING);
+    }
+
+    @Test
+    void closedGateAfterSeatAndTicketCommittedUndoesTicketThenSeat() {
+        venue.gateIsClosed(BoxOffice.BALCONY_GATE);
+
+        ConcertVenue.Attempt attempt = venue.fan("bob").buysSeat("G3")
+                .failsAt(ACCESS)
+                .afterUndoing(TICKETING, SEATING);
+
+        venue.seat("G3").isFreeAgain();
+        venue.order(attempt.orderId())
+                .hasTicket(Ticket.Status.VOIDED)
+                .hasNoPass()
+                .undidInThisOrder(TICKETING, SEATING);
+    }
+
+    @Test
+    void fullGateAlsoTriggersTheTwoStepRollback() {
+        venue.admin().setGateCapacity(BoxOffice.BALCONY_GATE, 1);
+        venue.fan("alice").buysSeat("G1").succeeds();
+
+        venue.fan("bob").buysSeat("G2").failsAt(ACCESS).afterUndoing(TICKETING, SEATING);
+
+        venue.seat("G2").isFreeAgain();
+        venue.seat("G1").isSoldTo("alice");
+    }
+
+    @Test
     void aSeatThatIsAlreadySoldFailsAtTheFirstStepWithNothingToUndo() {
         venue.fan("alice").buysSeat("A1").succeeds();
 
@@ -46,6 +86,23 @@ class PurchaseChainTest {
     @Test
     void aSeatThatDoesNotExistFailsAtTheFirstStep() {
         venue.fan("bob").buysSeat("Z42").failsAt(SEATING).withNothingToUndo();
+    }
+
+    @Test
+    void disposableEmailIsCaughtByFraudCheckAndTheSeatIsReleased() {
+        venue.fan("carol").buysSeatUsing("carol@mailinator.com", "B4").failsAt(TICKETING).afterUndoing(SEATING);
+
+        venue.seat("B4").isFreeAgain();
+    }
+
+    @Test
+    void afterCompensationTheSameSeatCanBeBoughtByAnHonestFan() {
+        venue.buyerIsBlocklisted("mallory");
+        venue.fan("mallory").buysSeat("C5").failsAt(TICKETING);
+
+        venue.fan("alice").buysSeat("C5").succeeds();
+
+        venue.seat("C5").isSoldTo("alice");
     }
 
     @Test
