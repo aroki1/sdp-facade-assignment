@@ -16,9 +16,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /** Client facade: runs A -> B -> C and compensates on failure. */
 public class TicketPurchaseFacade {
+    private static final Pattern BUYER_ID = Pattern.compile("[A-Za-z0-9_.-]{2,32}");
+
     private final SeatingService seating;
     private final TicketingService ticketing;
     private final AccessService access;
@@ -53,6 +56,7 @@ public class TicketPurchaseFacade {
     }
 
     public PurchaseReceipt purchase(PurchaseRequest request) {
+        validate(request);
         OrderRecord order = journal.open(request.buyerId().trim(), request.email().trim(),
                 request.seatCode().trim().toUpperCase());
         return drive(order);
@@ -95,6 +99,8 @@ public class TicketPurchaseFacade {
                     throw new PurchaseFailedException(order.orderId(), order.failedStep(), undone,
                             order.failureReason(), null);
                 }
+                default -> throw new IllegalStateException(
+                        "Order " + order.orderId() + " is already final: " + order.status());
             }
         }
     }
@@ -170,5 +176,20 @@ public class TicketPurchaseFacade {
         String barcode = ticketing.find(order.ticketId()).map(Ticket::barcode).orElse("?");
         return new PurchaseReceipt(order.orderId(), order.seatCode(), order.zone(), order.priceCents(),
                 order.ticketId(), barcode, order.passId(), order.gateId());
+    }
+
+    private static void validate(PurchaseRequest request) {
+        if (request == null) {
+            throw new InvalidPurchaseException("No purchase request given");
+        }
+        if (request.buyerId() == null || !BUYER_ID.matcher(request.buyerId().trim()).matches()) {
+            throw new InvalidPurchaseException("Buyer id must be 2-32 letters, digits, '.', '_' or '-'");
+        }
+        if (request.email() == null || request.email().isBlank()) {
+            throw new InvalidPurchaseException("An e-mail address is required");
+        }
+        if (request.seatCode() == null || request.seatCode().isBlank()) {
+            throw new InvalidPurchaseException("A seat code (e.g. C7) is required");
+        }
     }
 }

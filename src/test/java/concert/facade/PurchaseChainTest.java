@@ -96,6 +96,18 @@ class PurchaseChainTest {
     }
 
     @Test
+    void malformedRequestsAreRejectedBeforeAnythingIsRecorded() {
+        TicketPurchaseFacade purchases = venue.purchases();
+
+        assertThrows(InvalidPurchaseException.class, () -> purchases.purchase(null));
+        assertThrows(InvalidPurchaseException.class, () -> purchases.purchase(new PurchaseRequest(" ", "a@b.com", "C1")));
+        assertThrows(InvalidPurchaseException.class, () -> purchases.purchase(new PurchaseRequest("bad id!", "a@b.com", "C1")));
+        assertThrows(InvalidPurchaseException.class, () -> purchases.purchase(new PurchaseRequest("dave", "", "C1")));
+        assertThrows(InvalidPurchaseException.class, () -> purchases.purchase(new PurchaseRequest("dave", "d@x.com", null)));
+        assertTrue(venue.admin().orders().isEmpty());
+    }
+
+    @Test
     void afterCompensationTheSameSeatCanBeBoughtByAnHonestFan() {
         venue.buyerIsBlocklisted("mallory");
         venue.fan("mallory").buysSeat("C5").failsAt(TICKETING);
@@ -115,5 +127,14 @@ class PurchaseChainTest {
         assertEquals(15, offers.get("VIP").size());
         assertEquals(4_500, offers.get("BALCONY").get("G1"));
         assertEquals(15_000, venue.purchases().quoteCents("A2"));
+    }
+
+    @Test
+    void rejectedOrdersCannotBeResumedButCompletedOnesJustReturnTheirReceipt() {
+        String rejected = venue.fan("bob").buysSeat("Z1").orderId();
+        PurchaseReceipt done = venue.fan("alice").buysSeat("C1").succeeds();
+
+        assertThrows(IllegalStateException.class, () -> venue.purchases().resume(rejected));
+        assertEquals(done, venue.purchases().resume(done.orderId()));
     }
 }
