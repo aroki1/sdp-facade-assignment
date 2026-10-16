@@ -1,0 +1,201 @@
+@startuml
+!pragma layout smetana
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam defaultFontSize 11
+hide empty members
+title Concert Box Office - Facade over Seating (A) -> Ticketing (B) -> Access (C)
+
+package "Client" {
+  class BoxOfficeApp <<client / CLI>> {
+    -crashArmedAt : ChainStatus
+    +main(args)
+  }
+}
+
+package "concert.facade" {
+  class TicketPurchaseFacade <<facade>> {
+    +seatOffers() : Map
+    +quoteCents(seat) : long
+    +purchase(PurchaseRequest) : PurchaseReceipt
+    +resume(orderId) : PurchaseReceipt
+    +resumeInterrupted() : List<ResumeOutcome>
+    -drive(OrderRecord)
+    -holdSeat() / issueTicket() / grantAccess()
+  }
+  class BoxOfficeAdminFacade <<facade>> {
+    +orders() / interruptedOrders()
+    +inspect(orderId) : OrderInspection
+    +cancelCompletedOrder(orderId) : Cancellation
+    +compensateManually(orderId, reason)
+    +blockBuyer() / closeGate() / setGateCapacity()
+    +admit(orderId) / printTicket(orderId)
+  }
+  class ChainCompensator {
+    ~compensate(order, failedStep, reason)
+    ~finish(order) : List<ChainStep>
+  }
+  class OrderJournal <<persistence: orders.json>> {
+    +find(id) / all() / unfinished()
+    ~open(...) / save(order)
+  }
+  class OrderRecord {
+    orderId, buyerId, seatCode, zone
+    status : ChainStatus
+    holdId, ticketId, passId
+    compensatedSteps : List<ChainStep>
+    history : List<String>
+  }
+  enum ChainStatus {
+    PENDING_A
+    PENDING_B
+    PENDING_C
+    COMPLETED
+    REJECTED
+    COMPENSATING
+    COMPENSATED
+    CANCELLED
+  }
+  enum ChainStep {
+    SEATING
+    TICKETING
+    ACCESS
+  }
+  interface ChainCheckpointListener {
+    +checkpointed(OrderRecord)
+  }
+  class BoxOffice <<composition root>> {
+    +open(dataDir, eventDate, clock, listener)$
+  }
+  class PurchaseRequest <<record>>
+  class PurchaseReceipt <<record>>
+  class PurchaseFailedException
+  class InvalidPurchaseException
+}
+
+package "Subsystem A: concert.seating" {
+  class SeatingService {
+    +quoteCents(seat)
+    +hold(seat, holder, ref) : SeatHold
+    +confirm(holdId) / release(holdId, reason)
+    +findByReference(ref)
+  }
+  class SeatingChart <<logic>>
+  class DynamicPricingEngine <<logic>> {
+    +priceCents(section, sold, days)
+  }
+  class SeatHold <<entity>> {
+    status : HELD | CONFIRMED | RELEASED
+  }
+  class SeatHoldRepository <<gateway: holds.json>>
+  class SeatUnavailableException
+}
+
+package "Subsystem B: concert.ticketing" {
+  class TicketingService {
+    +issue(ref, holder, email, desc, price) : Ticket
+    +activate(id) / voidTicket(id, reason)
+    +blockBuyer() / print(id)
+  }
+  class FraudChecker <<logic>> {
+    +assess(...) : Verdict
+  }
+  class TicketPrinter <<logic>> {
+    +barcodeFor(id, holder)
+    +render(ticket)
+  }
+  class Ticket <<entity>> {
+    status : ISSUED | ACTIVATED | VOIDED
+  }
+  class TicketRepository <<gateway: tickets.json, blocklist.json>>
+  class FraudRejectedException
+}
+
+package "Subsystem C: concert.access" {
+  class AccessService {
+    +grant(ref, holder, zone, paid) : AccessPass
+    +scan(id) / revoke(id, reason)
+    +refund(id) : Refund
+    +closeGate() / openGate() / setCapacity()
+  }
+  class AccessControlGate <<logic>> {
+    +gateFor(zone, gates)
+    +checkAdmission(gate, count)
+  }
+  class RefundService <<logic>> {
+    +computeRefund(pass, today, event)
+  }
+  class AccessPass <<entity>> {
+    status : ACTIVE | USED | REVOKED
+  }
+  class AccessRepository <<gateway: passes/gates/refunds.json>>
+  class AccessDeniedException
+}
+
+package "concert.storage" {
+  class "JsonFileStore<T>" as JsonFileStore <<generic file IO>>
+}
+
+BoxOfficeApp --> TicketPurchaseFacade : uses
+BoxOfficeApp --> BoxOfficeAdminFacade : uses
+BoxOfficeApp ..> BoxOffice : opens
+BoxOfficeApp ..|> ChainCheckpointListener : crash hook
+
+BoxOffice ..> TicketPurchaseFacade : creates
+BoxOffice ..> BoxOfficeAdminFacade : creates
+
+TicketPurchaseFacade --> SeatingService : A
+TicketPurchaseFacade --> TicketingService : B
+TicketPurchaseFacade --> AccessService : C
+TicketPurchaseFacade --> OrderJournal
+TicketPurchaseFacade *-- ChainCompensator
+TicketPurchaseFacade --> ChainCheckpointListener
+TicketPurchaseFacade ..> PurchaseRequest
+TicketPurchaseFacade ..> PurchaseReceipt
+TicketPurchaseFacade ..> PurchaseFailedException : throws
+TicketPurchaseFacade ..> InvalidPurchaseException : throws
+
+BoxOfficeAdminFacade --> SeatingService
+BoxOfficeAdminFacade --> TicketingService
+BoxOfficeAdminFacade --> AccessService
+BoxOfficeAdminFacade --> OrderJournal
+BoxOfficeAdminFacade *-- ChainCompensator
+
+ChainCompensator --> SeatingService : undo A
+ChainCompensator --> TicketingService : undo B
+ChainCompensator --> AccessService : undo C
+ChainCompensator --> OrderJournal
+
+OrderJournal "1" o-- "*" OrderRecord
+OrderRecord --> ChainStatus
+OrderRecord --> ChainStep
+
+SeatingService --> SeatHoldRepository
+SeatingService --> SeatingChart
+SeatingService --> DynamicPricingEngine
+SeatingService ..> SeatUnavailableException : throws
+SeatHoldRepository "1" o-- "*" SeatHold
+
+TicketingService --> TicketRepository
+TicketingService --> FraudChecker
+TicketingService --> TicketPrinter
+TicketingService ..> FraudRejectedException : throws
+TicketRepository "1" o-- "*" Ticket
+
+AccessService --> AccessRepository
+AccessService --> AccessControlGate
+AccessService --> RefundService
+AccessService ..> AccessDeniedException : throws
+AccessRepository "1" o-- "*" AccessPass
+
+SeatHoldRepository ..> JsonFileStore
+TicketRepository ..> JsonFileStore
+AccessRepository ..> JsonFileStore
+OrderJournal ..> JsonFileStore
+
+note bottom of AccessService
+  No subsystem imports another:
+  A, B and C meet only inside the facade layer.
+end note
+@enduml
